@@ -1,0 +1,12 @@
+title: The Facebook Comet Prelude Files
+description: >-
+  The first complete public de-minification of Facebook's Comet prelude bundle:
+  Ghost Owl anti-tampering, DTSG/jazoest token plumbing, the Haste bootloader,
+  150 URI schemes, ServerJS streaming, and the Hyperion interception engine.
+  A frankSx research series.
+theme: jekyll-theme-hacker
+plugins:
+  - jekyll-seo-tag
+author: frankSx
+url: https://franksx.github.io
+baseurl: /facebook-comet-prelude-files
