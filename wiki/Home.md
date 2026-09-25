@@ -10,6 +10,8 @@ Welcome to the companion wiki for the [Facebook Comet Prelude Files](https://git
 * [[Ghost Owl quick reference|Ghost-Owl-Quick-Reference]] — detection matrix, gate keys, evasion notes
 * [[Request signing quick reference|Request-Signing-Quick-Reference]] — tokens, jazoest, getAsyncParams
 * [[URI scheme quick reference|URI-Scheme-Quick-Reference]] — all 150 schemes by category
+* [[fbcdn signed URLs quick reference|fbcdn-Signed-URLs]] — `_nc_*` parameters, four-state edge table, Everstore headers
+* [[Route payload envelope quick reference|Route-Payload-Envelope]] — route_definition JSON, Haste bitmaps, envelope anatomy
 * [[Capture and verify|Capture-and-Verify]] — reproduce the analysis against any live capture
 
 ## Full posts (rendered)
@@ -22,3 +24,5 @@ Welcome to the companion wiki for the [Facebook Comet Prelude Files](https://git
 * [Part 5 — ServerJS](https://github.com/FrankSx/facebook-comet-prelude-files/blob/main/05-serverjs-data-sjs-pipeline.md)
 * [Part 6 — Telemetry & Hyperion](https://github.com/FrankSx/facebook-comet-prelude-files/blob/main/06-error-telemetry-hyperion.md)
 * [Part 7 — Module index](https://github.com/FrankSx/facebook-comet-prelude-files/blob/main/07-appendix-module-index.md)
+* [Part 8 — fbcdn signed URL internals](https://github.com/FrankSx/facebook-comet-prelude-files/blob/main/08-fbcdn-signed-url-internals.md)
+* [Part 9 — Route payload envelope](https://github.com/FrankSx/facebook-comet-prelude-files/blob/main/09-comet-route-payload-envelope.md)

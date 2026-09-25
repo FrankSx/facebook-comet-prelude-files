@@ -24,6 +24,9 @@ This is the code that runs before anything else on the page: polyfills, the Hast
 6. **The Observation Deck: Facebook's Error, Telemetry, and Instrumentation Stack** — `fb-error`'s `messageFormat`/`taalOpcodes` protocol, ErrorGuard/ErrorPubSub, QPL, UserTimingUtils, Banzai, NetworkHeartbeat, and a full de-minification of **Hyperion** — Meta's property-descriptor interception engine with `__ext`/`__sproto` shadow prototypes.
 
 7. **Appendix: The Complete Annotated Module Index** — all 232 prelude modules, categorized, with dependency counts and one-line functional descriptions. The reference table for anyone doing their own analysis.
+8. **fbcdn Signed URL Internals: `_nc_*` Parameters, Everstore, and the Proxygen Edge** — Facebook's second, independent signature scheme, reverse-engineered from live captures: the `_nc_ht` HMAC binding (proven by deliberately breaking it), the four-state edge decision table (200/403/400/apex), Everstore/Needle integrity headers, and the 7-day signature vs 14-day cache TTL replay model. With capture-evidence flowchart. *(permalink `/2026/09/fbcdn-signed-url-internals-nc-parameters.html`)*
+
+9. **The Route Payload Envelope: How Facebook Ships a Page as JSON** — a complete annotated `route_definition` from production traffic: the URI-keyed envelope, `__jsr`/`__dr` resource recipes, the `entityKeyConfig` store-key recipe, Haste BitMap RLE in `sr_payload.hsrp.hblp` (`":1,2,31"` decoded), factory-wrapped `jsmods` requires, and why `dtsgToken` is nulled on the GET route path. The wire format that Parts 2, 3, and 5 exist to consume. *(permalink `/2026/09/comet-route-payload-envelope-facebook-json.html`)*
 
 ## Methodology
 
