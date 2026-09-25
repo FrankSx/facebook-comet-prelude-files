@@ -1,0 +1,65 @@
+alue (`google.com`) and a one-character-off value (`xxfbcdn` for `xx.fbcdn`) both fail the same way. The check is exact-string equality of the HMAC input, not a suffix or host-allowlist match — otherwise request 5 would have passed.
+2. **Method gates before signature.** Both POSTs returned 400 regardless of `_nc_ht`. The CDN object store is read-only; POST is a protocol-level dead end answered by the internal-response tier, one level *above* the signer in the pipeline.
+3. **GET + wrong `_nc_ht` is the only path that exercises the signer.** If you're probing a signature scheme, vary exactly one parameter over GET; everything else answers a different question.
+4. **The signer is stateless and fast.** Wrong-signature turnaround was 204ms, 60ms across attempts — no rate limiting observed on five rapid mismatches, and no progressive penalty (no `Retry-After`, no escalating status).
+
+## 4. What a 200 leaks: Everstore and Needle
+
+The success response is a full fingerprint of Meta's internal storage stack:
+
+```
+HTTP/2 200
+x-everstore-unified-metadata: 1
+last-modified: Wed, 23 Sep 2026 16:29:15 GMT
+content-type: image/webp
+x-needle-checksum: 1443449978
+content-digest: adler32=1443449978
+x-crypto-project: 0
+cross-origin-resource-policy: cross-origin
+timing-allow-origin: *
+access-control-allow-origin: *
+cache-control: max-age=1209600, no-transform
+accept-ranges: bytes
+content-length: 369724
+x-fb-edge-debug: ysEUxP1jK6tBpE2MnOW0iVb7M2RGZLdcnKVdjgmHLGmDSK-EmrBfj5TaeDlRCIeJtj5Fxmi2dSzlpd4oB5KfJXD1amjL4sNakfjA
+```
+
+- **`x-everstore-unified-metadata: 1`** — the object was served from **Everstore**, Meta's internal fault-tolerant blob-storage system (publicly described in Meta engineering talks as the backend for photos). The header marks the unified-metadata serving path.
+- **`x-needle-checksum` / `content-digest: adler32=1443449978`** — **Needle**, the Haystack-derived storage layer's integrity checksum (adler32 over the stored blob), exposed verbatim in a response header. The CDN will happily tell you the internal checksum of any object you can sign for.
+- **`x-crypto-project: 0`** — encryption-context flag; `0` = plaintext-at-rest tier for this object class.
+- **`cache-control: max-age=1209600, no-transform`** — 14-day edge cache TTL, *longer* than the 7-day `oe` signature expiry. Implication: a URL outlives its own signature. After expiry the edge must re-validate with the signer rather than serve from cache — the TTL skew is deliberate defense against stale-signed-URL replay from caches.
+- **`x-fb-edge-debug`** — per-response encrypted edge-debug blob; decodes only inside Meta's tooling. Presence on success, absence on 4xx, marks which tier stamped the response.
+- **`timing-allow-origin: *`** — the edge permits Resource Timing reads cross-origin, so any web page can measure fbcdn latency for its embedded Facebook assets.
+
+## 5. Connecting to the prelude
+
+Why does the Comet client carry an entire `shouldAppendToken` domain allowlist (Part 2) that *excludes* `fbcdn.net` and `fbsbx.com`? Because these URLs sign themselves. From `URI` / `getAsyncParams` in the bundle:
+
+- Application-layer tokens (`fb_dtsg`, jazoest) authenticate **state-changing application requests** to `facebook.com` / `*.facebook.com`.
+- Media-layer tokens (`oh`, `oe`, `_nc_*`) authorize **read-only fetches** of specific objects at the edge.
+
+The two schemes never mix: the client must not append CSRF tokens to CDN URLs (they'd break the signature), and CDN URLs carry no session state (a leaked signed URL is a capability, valid for 7 days, for exactly one object — the design assumption being that the HMAC input includes enough entropy that guessing is infeasible, which §3 confirms: partial knowledge of the scheme buys nothing without the key).
+
+This also explains the `URISchemes` and resource-host checks in the prelude: the client treats any URL whose host resolves to an fbcdn shard as a *resource*, not a *route*, and routes it through the Bootloader/Banzai download path (Part 3) instead of async navigation.
+
+## 6. Research notes
+
+**Reproducing the `_nc_ht` walk:** any signed image URL from a Facebook page load works. Issue GETs varying only `_nc_ht`: an unrelated hostname, a one-character mutation, and the correct value. Expect 403 / 403 / 200. Do not POST — it answers a different tier.
+
+**Expiry arithmetic:** `oe` is a plain hex epoch. Deltas observed across objects minted the same week cluster at exactly 7 days (± minutes). `ccb` epochs correlate with client build pushes, not object uploads.
+
+**Checksum cross-check:** `x-needle-checksum` (adler32) can be recomputed over any fetched object; it matches `content-digest`. For archived objects this gives a third integrity anchor alongside the transport checksum and the file's own metadata — useful when validating that a re-fetched object is bit-identical to a previously captured one.
+
+**The uncaptured state:** the true `GET /` 404 on the apex vhost. The captured apex response was a POST-induced 400. If you capture the apex GET 404 headers, the four-state table in §2 completes — send them and this post will be updated.
+
+## 7. Summary
+
+Facebook's CDN edge is a three-tier pipeline: an HTTP front (Proxygen) that rejects malformed methods with an anonymous 400 shell, a stateless HMAC signer that answers wrong signatures with a 22-byte 403, and an Everstore/Needle storage backend that stamps every success with internal integrity metadata. The `_nc_*` parameter family binds host claim, object revision, expiry, and shard into one signature — and the 7-day signature / 14-day cache TTL skew shows the replay model was thought through. None of this is documented by Meta. All of it is observable from a browser, a HAR recorder, and five GETs.
+
+---
+
+*Next: Part 9 — the Comet route payload envelope: route definitions, Haste bitmaps in `sr_payload`, and ServerJS-by-JSON.*
+
+*Series index · Part 1 (Ghost Owl) · Part 2 (request signing) · Part 3 (Bootloader/Haste) · Part 4 (URL schemes) · Part 5 (ServerJS) · Part 6 (telemetry/Hyperion) · Part 7 (module index)*
+
+*frankSx — hardware/web reverse engineering, parser internals, anti-analysis systems. frankhacks.blogspot.com*
