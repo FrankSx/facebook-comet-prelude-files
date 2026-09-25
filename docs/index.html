@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><link rel="stylesheet" href="style.css"><title>The Facebook Comet Prelude Files — Series Index</title></head><body><main class="wrap"><h1>The Facebook Comet Prelude Files — Series Index</h1>
+<p><strong>A frankSx research series · frankhacks.blogspot.com</strong></p>
+<p><strong>Source artifact:</strong> a 326,001-byte production Facebook "Comet prelude" bundle (<code>;/*FB_PKG_DELIM*/</code> wrapper), 232 <code>__d</code> modules, captured September 2026 from the critical-path inline JavaScript of facebook.com.</p>
+<ul>
+<li>SHA-256: <code>57d60f40f636669c259ec6f945ae4264ac4b55cba01a5e767affaad900e69ec4</code></li>
+<li>MD5: <code>6f7a5cb0db878cdd9be1901cd5e2724b</code></li>
+</ul>
+<p>This is the code that runs before anything else on the page: polyfills, the Haste module system, the bootloader, CSRF plumbing, the error/telemetry stack, and Ghost Owl — Facebook's anti-tampering defense system. Meta does not document these internals publicly. What little exists in blog posts and CTF write-ups is years out of date. This series is intended to be the canonical public reference.</p>
+<h2>The posts</h2>
+<ol>
+<li>
+<p><strong>Inside Ghost Owl: Facebook's Anti-Tampering Immune System</strong> — the <code>GHL*</code> module family: hook detection via native-signature comparison, double-<code>toString</code> anti-spoofing, prototype-chain walking, clean-realm recovery from hidden iframes, the 13 obfuscated <code>window.Env</code> gate keys, the <code>SponsoredData</code> decoy payload, and the vendored json5 fallback. With a complete gate-ID inventory and evasion analysis for instrumentation authors.</p>
+</li>
+<li>
+<p><strong>Anatomy of a Facebook Async Request: DTSG, LSD, jazoest, and getAsyncParams</strong> — the complete request-signing map: POST vs GET token split (<code>fb_dtsg</code> / <code>fb_dtsg_ag</code>), the jazoest checksum derivation, LSD fallback, WebSession ID format and storage, the token-attachment domain allowlist, and a replay checklist for tooling authors.</p>
+</li>
+<li>
+<p><strong>The __d Machine: Facebook's Bootloader and Haste Module System</strong> — the registry kernel, module state bitmasks, four require flavors, the bootloader endpoint request/response format, retry circuit breaker, Haste bitmaps, translation fetching, resource scheduling tiers, and ClientConsistency.</p>
+</li>
+<li>
+<p><strong>Facebook's Custom URL Scheme Allowlist: A 150-Entry Attack Surface Inventory</strong> — the complete <code>URISchemes</code> set, verbatim and categorized, with enforcement mechanics, adjacent parser hardening, and research notes per category.</p>
+</li>
+<li>
+<p><strong>ServerJS and the data-sjs Pipeline: How Facebook Streams Its UI</strong> — the streaming architecture: payload anatomy, the content-length integrity gate, dual-generation listeners, the defensive parse chain, transport markers, and scheduled execution.</p>
+</li>
+<li>
+<p><strong>The Observation Deck: Facebook's Error, Telemetry, and Instrumentation Stack</strong> — <code>fb-error</code>'s <code>messageFormat</code>/<code>taalOpcodes</code> protocol, ErrorGuard/ErrorPubSub, QPL, UserTimingUtils, Banzai, NetworkHeartbeat, and a full de-minification of <strong>Hyperion</strong> — Meta's property-descriptor interception engine with <code>__ext</code>/<code>__sproto</code> shadow prototypes.</p>
+</li>
+<li>
+<p><strong>Appendix: The Complete Annotated Module Index</strong> — all 232 prelude modules, categorized, with dependency counts and one-line functional descriptions. The reference table for anyone doing their own analysis.</p>
+</li>
+<li>
+<p><strong>fbcdn Signed URL Internals: <code>_nc_*</code> Parameters, Everstore, and the Proxygen Edge</strong> — Facebook's second, independent signature scheme, reverse-engineered from live captures: the <code>_nc_ht</code> HMAC binding (proven by deliberately breaking it), the four-state edge decision table (200/403/400/apex), Everstore/Needle integrity headers, and the 7-day signature vs 14-day cache TTL replay model. With capture-evidence flowchart. <em>(permalink <code>/2026/09/fbcdn-signed-url-internals-nc-parameters.html</code>)</em></p>
+</li>
+<li>
+<p><strong>The Route Payload Envelope: How Facebook Ships a Page as JSON</strong> — a complete annotated <code>route_definition</code> from production traffic: the URI-keyed envelope, <code>__jsr</code>/<code>__dr</code> resource recipes, the <code>entityKeyConfig</code> store-key recipe, Haste BitMap RLE in <code>sr_payload.hsrp.hblp</code> (<code>":1,2,31"</code> decoded), factory-wrapped <code>jsmods</code> requires, and why <code>dtsgToken</code> is nulled on the GET route path. The wire format that Parts 2, 3, and 5 exist to consume. <em>(permalink <code>/2026/09/comet-route-payload-envelope-facebook-json.html</code>)</em></p>
+</li>
+</ol>
+<h2>Methodology</h2>
+<p>All code excerpts were de-minified from the captured bundle. Minified identifiers (<code>e</code>, <code>t</code>, <code>n</code>, <code>r</code>) are preserved or renamed only where the intent is unambiguous from context (exported names, dependency arrays, FBLogger category strings, invariant messages). Module names in <code>__d("...")</code> declarations, gate IDs, and string literals are verbatim from production. Every claim in this series can be verified against the bundle hash above: capture the prelude from any facebook.com page load (<code>view-source:</code> or devtools → the first inline <code>&lt;script&gt;</code> blocks), hash it, and diff.</p>
+<h2>Citation</h2>
+<p>If you reference this work, link the series index on frankhacks.blogspot.com and cite the bundle SHA-256 above — prelude contents shift with deploys, and the hash pins the analysis to a specific artifact.</p>
+<p><em>frankSx — hardware/web reverse engineering, parser internals, anti-analysis systems. Previously: the SVG Jailbreak series, MESCALINE defense research, OMNIBUS hardware RE toolkit.</em></p>
+</main></body></html>

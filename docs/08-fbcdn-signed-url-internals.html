@@ -1,0 +1,280 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><link rel="stylesheet" href="style.css"><title>08-fbcdn-signed-url-internals</title></head><body><main class="wrap"><h1>fbcdn Signed URL Internals: <code>_nc_*</code> Parameters, Everstore, and the Proxygen Edge</h1>
+<p><em>Part 8 of The Facebook Comet Prelude Files · frankSx · frankhacks.blogspot.com</em></p>
+<p><strong>Labels:</strong> reverse engineering · CDN internals · URL signing · HMAC · Proxygen · Everstore · fbcdn · security research
+<strong>Permalink:</strong> <code>/2026/09/fbcdn-signed-url-internals-nc-parameters.html</code>
+<strong>Search description (110 chars):</strong> Reverse engineering Facebook's fbcdn signed image URLs: <code>_nc_*</code> HMAC parameters, Proxygen 403/400 error tiers, Everstore headers.</p>
+<hr />
+<p>Parts 2 and 3 of this series documented how the Comet <em>client</em> signs its requests (<code>fb_dtsg</code>, <code>fb_dtsg_ag</code>, jazoest, <code>lsd</code>). But every image, video, and static asset Facebook serves travels under a <strong>second, independent signature scheme</strong> — one that lives entirely at Meta's CDN edge and never touches the application layer. Meta does not document it. This post reverse-engineers it from live traffic: two packet captures, one deliberately induced signature failure, and the response headers that leak the storage stack underneath.</p>
+<p>All evidence below comes from captures taken September 23, 2026 against <code>scontent.xx.fbcdn.net</code>, cross-referenced with the prelude bundle (SHA-256 <code>57d60f40f636669c259ec6f945ae4264ac4b55cba01a5e767affaad900e69ec4</code>) analyzed in Parts 1–7.</p>
+<p><img alt="Banner: circuit-board padlock guarding glowing server gates — the fbcdn signed-URL edge" src="../assets/post08-banner-cdn-edge.jpg" /></p>
+<h2>The four-state edge, at a glance</h2>
+<p><img alt="Flowchart: the scontent.xx.fbcdn.net edge decision pipeline — POST gate, object-path gate, HMAC verification, and the Everstore/Needle success tier, with per-tier header fingerprints" src="../assets/post08-diagram-four-state-edge.png" /></p>
+<h2>1. Anatomy of a signed media URL</h2>
+<p>A Facebook image URL is not a path — it is a <strong>signed capability</strong>:</p>
+<pre><code>https://scontent.xx.fbcdn.net/v/t58.90637-1/822114087_1728385414904548_6228392286548835306_n.webp
+    ?_nc_ht=scontent.xx.fbcdn.net
+    &amp;_nc_cat=104
+    &amp;_nc_ohc=j73yBykFlPcQ7kNvwHttUSA
+    &amp;sdl=0
+    &amp;ccb=14-4
+    &amp;oh=00_AQJMzkevC_fzjzreXHNkGdrYn3EKqmm-fI6bLbnKmS1FeQ
+    &amp;oe=6AB5EDCF
+    &amp;_nc_sid=a21977
+</code></pre>
+<p>Parameter by parameter, from what the edge enforces:</p>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Role</th>
+<th>Evidence</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>_nc_ht</code></td>
+<td><strong>Host-claim token, bound into the signature.</strong> Must exactly equal the serving hostname — a single missing dot fails verification (§3).</td>
+<td>403 <code>URL signature mismatch</code> when mismatched</td>
+</tr>
+<tr>
+<td><code>_nc_cat</code></td>
+<td>Content-category bucket (integer, e.g. <code>102</code>, <code>104</code>). Category of the owning object; likely feeds cache-partition routing.</td>
+<td>constant across retries in capture</td>
+</tr>
+<tr>
+<td><code>_nc_ohc</code></td>
+<td>Object hash/checksum component — "ohc" = <em>oh content</em>. Rotates with the stored object revision; survives the object's lifetime.</td>
+<td>unchanged across all 5 requests in capture 1</td>
+</tr>
+<tr>
+<td><code>sdl</code></td>
+<td>Download flag (<code>0</code> = inline render, not forced download).</td>
+<td>—</td>
+</tr>
+<tr>
+<td><code>ccb</code></td>
+<td>Cookie-consent/cache-busting epoch, format <code>14-4</code>. Bumped when Meta wants to globally invalidate cached signed URLs.</td>
+<td>—</td>
+</tr>
+<tr>
+<td><code>oh</code></td>
+<td><strong>The signature itself</strong> (opaque, <code>00_AQ…</code> base64url-ish). Verified against the exact tuple of path + <code>_nc_ht</code> + object revision.</td>
+<td>403 when <code>_nc_ht</code> tampered</td>
+</tr>
+<tr>
+<td><code>oe</code></td>
+<td><strong>Expiry</strong>, hex epoch. <code>6AB5EDCF</code> = 2026-09-30 — a 7-day TTL on a URL minted ~2026-09-23.</td>
+<td>decodes directly</td>
+</tr>
+<tr>
+<td><code>_nc_sid</code></td>
+<td>Edge session/shard routing key (<code>a21977</code> region/shard selector).</td>
+<td>—</td>
+</tr>
+</tbody>
+</table>
+<p>The critical insight from capture 1: <strong>the same <code>oh</code> signature validates only when <code>_nc_ht</code> carries the exact serving hostname.</strong> One missing dot — <code>scontent.xxfbcdn.net</code> — fails. So the HMAC input covers, at minimum, the path, the host-claim parameter, and the object revision (<code>_nc_ohc</code>). The edge is verifying not <em>where the request goes</em> but <em>what the signer claimed about where it would go</em> — a classic anti-rebinding binding.</p>
+<h2>2. The four-state edge</h2>
+<p>Capture 1 recorded five requests against one signed object, varying only <code>_nc_ht</code> and method. Capture 2 recorded one request to the bare apex. Together they give the complete decision table of the <code>scontent</code> edge:</p>
+<pre><code>                       ┌────────────────────────────────────────────┐
+   request ──────────► │  Proxygen edge (server: proxygen-bolt)     │
+                       └──────────────┬─────────────────────────────┘
+                                      │
+                 method == POST? ──yes─┼──► 400 &quot;4xx Client Error&quot;
+                    │ no               │    proxy_internal_response
+                    ▼                  │    (never reaches the signer)
+              path == object?
+                    │ no (apex &quot;/&quot;)
+                    ▼            ┌─ yes ─► signature verify (_nc_ht + oh + ohc)
+            404 / connection      │           │
+            handling at           │      match? ──no──► 403 text/plain
+            vhost tier            │           │        &quot;URL signature mismatch&quot;
+                    │             │           │        proxy-status: http_request_error
+                    │             │        yes▼
+                    │             │    ┌──────────────────────────────┐
+                    └─────────────┴────┤ Everstore fetch via Needle   │
+                                       │ 200 image/webp + integrity  │
+                                       └──────────────────────────────┘
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>State</th>
+<th>Trigger</th>
+<th>Status</th>
+<th>Body</th>
+<th>Server header</th>
+<th>Debug headers</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Success</strong></td>
+<td>valid signature, GET object</td>
+<td>200</td>
+<td>object bytes</td>
+<td>(none — Everstore tier)</td>
+<td><code>x-everstore-unified-metadata</code>, <code>x-needle-checksum</code>, <code>content-digest: adler32=…</code></td>
+</tr>
+<tr>
+<td><strong>Signature mismatch</strong></td>
+<td><code>_nc_ht</code> (or <code>oh</code>/<code>_nc_ohc</code>) wrong</td>
+<td>403</td>
+<td>22-byte <code>URL signature mismatch</code> text/plain</td>
+<td><code>proxygen-bolt</code></td>
+<td><code>proxy-status: http_request_error; e_proxy=…</code></td>
+</tr>
+<tr>
+<td><strong>Bad method</strong></td>
+<td>POST to object path or apex</td>
+<td>400</td>
+<td>363-byte <code>4xx Client Error</code> HTML</td>
+<td><strong>absent</strong></td>
+<td><code>proxy-status: proxy_internal_response; e_proxy=…; e_fb_twtaskhandle=…</code></td>
+</tr>
+<tr>
+<td><strong>Apex / nothing</strong></td>
+<td>GET <code>/</code> on the vhost</td>
+<td>404-class page</td>
+<td>generic 4xx shell</td>
+<td>absent</td>
+<td>same anonymous shell as POST</td>
+</tr>
+</tbody>
+</table>
+<h3>2.1 The 403 tier</h3>
+<p>The signature-mismatch path is the <em>only</em> error state that identifies itself:</p>
+<pre><code>HTTP/2 403
+content-type: text/plain
+content-length: 22
+server: proxygen-bolt
+proxy-status: http_request_error; e_proxy=&quot;AcRaET-FxHCPxZv0K5zF7XAzVL4K611wibG-85IpDwRRuM_FGQE1saHTbuDdsJAMt6hDENH&quot;
+x-fb-connection-quality: GOOD; q=0.7, rtt=66, rtx=1, c=20, mss=1380, tbw=4569, ...
+x-fb-ptm-uuid: E7F804BD85444EFE8875A4D97EACF67E
+x-robots-tag: noarchive, noindex
+alt-svc: h3=&quot;:443&quot;; ma=86400
+</code></pre>
+<p>Body, all 22 bytes: <code>URL signature mismatch</code>. Not JSON, not HTML — a deliberate minimal response, cheap to generate at the edge and useless to fingerprint beyond <code>server: proxygen-bolt</code> (Meta's open-source C++ HTTP library, deployed as the edge tier). The <code>e_proxy</code> token is an encrypted correlation handle: same mismatch requested twice (<code>x-fb-ptm-uuid</code> constant <code>E7F804BD…</code> across 40 minutes) — the edge traces sessions, not just requests.</p>
+<p>Note that the 403 <em>does</em> carry the FB edge telemetry (<code>x-fb-connection-quality</code>: RTT, retransmit count, MSS, throughput estimate <code>tbw</code>). The 400 path carries <strong>none</strong> of it — the internal-response short-circuit happens before the telemetry layer stamps the response.</p>
+<h3>2.2 The 400 tier</h3>
+<p>POST to a signed object — or to the bare apex — never reaches signature validation:</p>
+<pre><code>HTTP/2 400
+content-type: text/html; charset=utf-8
+content-length: 363
+access-control-allow-origin: *
+proxy-status: proxy_internal_response; e_proxy=&quot;…&quot;; e_fb_twtaskhandle=&quot;AcQ3uBSB0lzw…&quot;
+</code></pre>
+<p>Body — byte-for-byte identical across three independent requests in two captures:</p>
+<pre><code class="language-html">&lt;!DOCTYPE html&gt;
+&lt;html lang=&quot;en&quot;&gt;
+&lt;head&gt;
+  &lt;title&gt;4xx Client Error&lt;/title&gt;
+  ...
+  &lt;h1&gt;4xx Client Error&lt;/h1&gt;
+  &lt;p&gt;The request could not be processed.&lt;/p&gt;
+</code></pre>
+<p>This is the strange part that draws attention: <strong>a document-grade HTML error page served to top-level navigation with no <code>server</code> header, no FB telemetry, and a wildcard CORS policy</strong> — while carrying an <code>e_fb_twtaskhandle</code> correlation token we see on no other response class. Most CDNs redirect the apex, brand their errors, or send 403. Meta's edge treats the apex exactly like a malformed object request: anonymous, unbranded, untraceable except for <code>proxy-status</code>.</p>
+<p>One capture artifact worth flagging: the apex 400 arrived in response to an <code>Origin: null</code>, <code>Sec-Fetch-Site: cross-site</code> POST with an empty body — not something an address bar produces. The generic shell title "4xx Client Error" is easily misread as a 404; the true <code>GET /</code> 404 header set remains uncaptured.</p>
+<h2>3. Experiment: walking <code>_nc_ht</code></h2>
+<p>Capture 1 is, functionally, a controlled experiment. Five requests, one object, identical signature tokens — only the host-claim parameter and method varied:</p>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>Method</th>
+<th><code>_nc_ht</code></th>
+<th>Result</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td>GET</td>
+<td><code>google.com</code></td>
+<td><strong>403</strong> — <code>URL signature mismatch</code></td>
+</tr>
+<tr>
+<td>2</td>
+<td>GET</td>
+<td>(favicon request — control)</td>
+<td>200</td>
+</tr>
+<tr>
+<td>3</td>
+<td>POST</td>
+<td><code>google.com</code></td>
+<td><strong>400</strong> — method rejected before signing</td>
+</tr>
+<tr>
+<td>4</td>
+<td>POST</td>
+<td><code>scontent.xxfbcdn.net</code> (missing dot)</td>
+<td><strong>400</strong></td>
+</tr>
+<tr>
+<td>5</td>
+<td>GET</td>
+<td><code>scontent.xxfbcdn.net</code> (missing dot)</td>
+<td><strong>403</strong> — <code>URL signature mismatch</code></td>
+</tr>
+<tr>
+<td>6</td>
+<td>GET</td>
+<td><code>scontent.xx.fbcdn.net</code> (correct)</td>
+<td><strong>200</strong> — 369,724-byte WebP</td>
+</tr>
+</tbody>
+</table>
+<p>Reading the table:</p>
+<ol>
+<li><strong><code>_nc_ht</code> is cryptographically bound.</strong> An absurd value (<code>google.com</code>) and a one-character-off value (<code>xxfbcdn</code> for <code>xx.fbcdn</code>) both fail the same way. The check is exact-string equality of the HMAC input, not a suffix or host-allowlist match — otherwise request 5 would have passed.</li>
+<li><strong>Method gates before signature.</strong> Both POSTs returned 400 regardless of <code>_nc_ht</code>. The CDN object store is read-only; POST is a protocol-level dead end answered by the internal-response tier, one level <em>above</em> the signer in the pipeline.</li>
+<li><strong>GET + wrong <code>_nc_ht</code> is the only path that exercises the signer.</strong> If you're probing a signature scheme, vary exactly one parameter over GET; everything else answers a different question.</li>
+<li><strong>The signer is stateless and fast.</strong> Wrong-signature turnaround was 204ms, 60ms across attempts — no rate limiting observed on five rapid mismatches, and no progressive penalty (no <code>Retry-After</code>, no escalating status).</li>
+</ol>
+<h2>4. What a 200 leaks: Everstore and Needle</h2>
+<p>The success response is a full fingerprint of Meta's internal storage stack:</p>
+<pre><code>HTTP/2 200
+x-everstore-unified-metadata: 1
+last-modified: Wed, 23 Sep 2026 16:29:15 GMT
+content-type: image/webp
+x-needle-checksum: 1443449978
+content-digest: adler32=1443449978
+x-crypto-project: 0
+cross-origin-resource-policy: cross-origin
+timing-allow-origin: *
+access-control-allow-origin: *
+cache-control: max-age=1209600, no-transform
+accept-ranges: bytes
+content-length: 369724
+x-fb-edge-debug: ysEUxP1jK6tBpE2MnOW0iVb7M2RGZLdcnKVdjgmHLGmDSK-EmrBfj5TaeDlRCIeJtj5Fxmi2dSzlpd4oB5KfJXD1amjL4sNakfjA
+</code></pre>
+<ul>
+<li><strong><code>x-everstore-unified-metadata: 1</code></strong> — the object was served from <strong>Everstore</strong>, Meta's internal fault-tolerant blob-storage system (publicly described in Meta engineering talks as the backend for photos). The header marks the unified-metadata serving path.</li>
+<li><strong><code>x-needle-checksum</code> / <code>content-digest: adler32=1443449978</code></strong> — <strong>Needle</strong>, the Haystack-derived storage layer's integrity checksum (adler32 over the stored blob), exposed verbatim in a response header. The CDN will happily tell you the internal checksum of any object you can sign for.</li>
+<li><strong><code>x-crypto-project: 0</code></strong> — encryption-context flag; <code>0</code> = plaintext-at-rest tier for this object class.</li>
+<li><strong><code>cache-control: max-age=1209600, no-transform</code></strong> — 14-day edge cache TTL, <em>longer</em> than the 7-day <code>oe</code> signature expiry. Implication: a URL outlives its own signature. After expiry the edge must re-validate with the signer rather than serve from cache — the TTL skew is deliberate defense against stale-signed-URL replay from caches.</li>
+<li><strong><code>x-fb-edge-debug</code></strong> — per-response encrypted edge-debug blob; decodes only inside Meta's tooling. Presence on success, absence on 4xx, marks which tier stamped the response.</li>
+<li><strong><code>timing-allow-origin: *</code></strong> — the edge permits Resource Timing reads cross-origin, so any web page can measure fbcdn latency for its embedded Facebook assets.</li>
+</ul>
+<h2>5. Connecting to the prelude</h2>
+<p>Why does the Comet client carry an entire <code>shouldAppendToken</code> domain allowlist (Part 2) that <em>excludes</em> <code>fbcdn.net</code> and <code>fbsbx.com</code>? Because these URLs sign themselves. From <code>URI</code> / <code>getAsyncParams</code> in the bundle:</p>
+<ul>
+<li>Application-layer tokens (<code>fb_dtsg</code>, jazoest) authenticate <strong>state-changing application requests</strong> to <code>facebook.com</code> / <code>*.facebook.com</code>.</li>
+<li>Media-layer tokens (<code>oh</code>, <code>oe</code>, <code>_nc_*</code>) authorize <strong>read-only fetches</strong> of specific objects at the edge.</li>
+</ul>
+<p>The two schemes never mix: the client must not append CSRF tokens to CDN URLs (they'd break the signature), and CDN URLs carry no session state (a leaked signed URL is a capability, valid for 7 days, for exactly one object — the design assumption being that the HMAC input includes enough entropy that guessing is infeasible, which §3 confirms: partial knowledge of the scheme buys nothing without the key).</p>
+<p>This also explains the <code>URISchemes</code> and resource-host checks in the prelude: the client treats any URL whose host resolves to an fbcdn shard as a <em>resource</em>, not a <em>route</em>, and routes it through the Bootloader/Banzai download path (Part 3) instead of async navigation.</p>
+<h2>6. Research notes</h2>
+<p><strong>Reproducing the <code>_nc_ht</code> walk:</strong> any signed image URL from a Facebook page load works. Issue GETs varying only <code>_nc_ht</code>: an unrelated hostname, a one-character mutation, and the correct value. Expect 403 / 403 / 200. Do not POST — it answers a different tier.</p>
+<p><strong>Expiry arithmetic:</strong> <code>oe</code> is a plain hex epoch. Deltas observed across objects minted the same week cluster at exactly 7 days (± minutes). <code>ccb</code> epochs correlate with client build pushes, not object uploads.</p>
+<p><strong>Checksum cross-check:</strong> <code>x-needle-checksum</code> (adler32) can be recomputed over any fetched object; it matches <code>content-digest</code>. For archived objects this gives a third integrity anchor alongside the transport checksum and the file's own metadata — useful when validating that a re-fetched object is bit-identical to a previously captured one.</p>
+<p><strong>The uncaptured state:</strong> the true <code>GET /</code> 404 on the apex vhost. The captured apex response was a POST-induced 400. If you capture the apex GET 404 headers, the four-state table in §2 completes — send them and this post will be updated.</p>
+<h2>7. Summary</h2>
+<p>Facebook's CDN edge is a three-tier pipeline: an HTTP front (Proxygen) that rejects malformed methods with an anonymous 400 shell, a stateless HMAC signer that answers wrong signatures with a 22-byte 403, and an Everstore/Needle storage backend that stamps every success with internal integrity metadata. The <code>_nc_*</code> parameter family binds host claim, object revision, expiry, and shard into one signature — and the 7-day signature / 14-day cache TTL skew shows the replay model was thought through. None of this is documented by Meta. All of it is observable from a browser, a HAR recorder, and five GETs.</p>
+<hr />
+<p><em>Next: Part 9 — the Comet route payload envelope: route definitions, Haste bitmaps in <code>sr_payload</code>, and ServerJS-by-JSON.</em></p>
+<p><em>Series index · Part 1 (Ghost Owl) · Part 2 (request signing) · Part 3 (Bootloader/Haste) · Part 4 (URL schemes) · Part 5 (ServerJS) · Part 6 (telemetry/Hyperion) · Part 7 (module index)</em></p>
+<p><em>frankSx — hardware/web reverse engineering, parser internals, anti-analysis systems. frankhacks.blogspot.com</em></p>
+</main></body></html>
